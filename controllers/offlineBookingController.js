@@ -35,14 +35,25 @@ export const createOfflineBooking = async (req, res) => {
       });
     }
 
-    // Calculate start and end times
-    const bookingDate = new Date(date);
-    bookingDate.setHours(startHour, 0, 0, 0);
-    const startTime = bookingDate;
+    // Parse date in IST (UTC+5:30) to ensure consistency
+    const [year, month, day] = date.split('-').map(Number);
+    if (!year || !month || !day) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid date format. Use YYYY-MM-DD'
+      });
+    }
+
+    // Create date at midnight IST
+    const dateObj = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+    dateObj.setMinutes(dateObj.getMinutes() - 330); // Subtract IST offset
+
+    // Set start and end times in IST
+    const startTime = new Date(dateObj);
+    startTime.setHours(startTime.getHours() + startHour);
     
-    const endDate = new Date(bookingDate);
-    endDate.setHours(startHour + duration, 0, 0, 0);
-    const endTime = endDate;
+    const endTime = new Date(dateObj);
+    endTime.setHours(endTime.getHours() + startHour + duration);
 
     // Check for existing paid bookings (same logic as online bookings)
     const existingBooking = await Booking.findOne({
