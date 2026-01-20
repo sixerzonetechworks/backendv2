@@ -329,13 +329,28 @@ export const createOrder = async (req, res) => {
     // DATE & TIME VALIDATION
     // ========================================================================
     
-    // Parse date (assumes YYYY-MM-DD format)
-    const dateObj = new Date(date + 'T00:00:00');
-    if (isNaN(dateObj.getTime())) {
+    // Parse date in IST (UTC+5:30) to ensure consistency across different server timezones
+    // Date format: YYYY-MM-DD
+    const [year, month, day] = date.split('-').map(Number);
+    if (!year || !month || !day) {
       return res.status(400).json({ 
         success: false,
         error: 'Invalid date format',
         details: 'Please provide date in YYYY-MM-DD format'
+      });
+    }
+
+    // Create date at midnight IST by using UTC and adjusting for IST offset
+    // IST = UTC + 5:30, so we subtract 5:30 from midnight to get the correct UTC time
+    const dateObj = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+    // Subtract IST offset (5.5 hours = 330 minutes) to get IST midnight in UTC terms
+    dateObj.setMinutes(dateObj.getMinutes() - 330);
+    
+    if (isNaN(dateObj.getTime())) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Invalid date',
+        details: 'Please provide a valid date'
       });
     }
 
@@ -345,11 +360,12 @@ export const createOrder = async (req, res) => {
     const lastHour = sortedHours[sortedHours.length - 1];
     const duration = hoursArray.length;
 
+    // Set times in IST by creating UTC times adjusted for IST offset
     const startTime = new Date(dateObj);
-    startTime.setHours(firstHour, 0, 0, 0);
+    startTime.setHours(startTime.getHours() + firstHour);
 
     const endTime = new Date(dateObj);
-    endTime.setHours(lastHour + 1, 0, 0, 0);
+    endTime.setHours(endTime.getHours() + lastHour + 1);
 
     // Prevent booking past slots (allow up to 30 minutes into the first slot)
     const now = new Date();
