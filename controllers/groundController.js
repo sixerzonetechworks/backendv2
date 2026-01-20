@@ -409,9 +409,18 @@ export const getAvailableSlots = async (req, res) => {
       return res.status(400).json({ error: 'date is required query parameter' });
     }
 
-    const dateObj = new Date(date + 'T00:00:00');
-    if (isNaN(dateObj.getTime())) {
+    // Parse date in IST (UTC+5:30) to ensure consistency
+    const [year, month, day] = date.split('-').map(Number);
+    if (!year || !month || !day) {
       return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+    }
+
+    // Create date at midnight IST
+    const dateObj = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+    dateObj.setMinutes(dateObj.getMinutes() - 330); // Subtract IST offset
+    
+    if (isNaN(dateObj.getTime())) {
+      return res.status(400).json({ error: 'Invalid date' });
     }
 
     const nextDay = new Date(dateObj);
@@ -450,7 +459,7 @@ export const getAvailableSlots = async (req, res) => {
     
     for (let hour = 0; hour < 24; hour++) {
       const requestedStartTime = new Date(dateObj);
-      requestedStartTime.setHours(hour, 0, 0, 0);
+      requestedStartTime.setHours(requestedStartTime.getHours() + hour);
       const slotEndBuffer = new Date(requestedStartTime);
       slotEndBuffer.setMinutes(slotEndBuffer.getMinutes() + 30);
 
@@ -462,7 +471,7 @@ export const getAvailableSlots = async (req, res) => {
         enabled = false;
       } else {
         const requestedEndTime = new Date(requestedStartTime);
-        requestedEndTime.setHours(hour + 1);
+        requestedEndTime.setHours(requestedEndTime.getHours() + 1);
 
         // Check if at least one ground is available
         let anyGroundAvailable = false;
@@ -562,9 +571,18 @@ export const getAvailableGrounds = async (req, res) => {
       }
     }
 
-    const dateObj = new Date(date + 'T00:00:00');
-    if (isNaN(dateObj.getTime())) {
+    // Parse date in IST (UTC+5:30) to ensure consistency
+    const [year, month, day] = date.split('-').map(Number);
+    if (!year || !month || !day) {
       return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+    }
+
+    // Create date at midnight IST
+    const dateObj = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+    dateObj.setMinutes(dateObj.getMinutes() - 330); // Subtract IST offset
+    
+    if (isNaN(dateObj.getTime())) {
+      return res.status(400).json({ error: 'Invalid date' });
     }
 
     // ========================================================================
@@ -602,9 +620,9 @@ export const getAvailableGrounds = async (req, res) => {
       let isAvailable = true;
       for (const hour of hoursArray) {
         const requestedStartTime = new Date(dateObj);
-        requestedStartTime.setHours(hour, 0, 0, 0);
+        requestedStartTime.setHours(requestedStartTime.getHours() + hour);
         const requestedEndTime = new Date(requestedStartTime);
-        requestedEndTime.setHours(hour + 1, 0, 0, 0);
+        requestedEndTime.setHours(requestedEndTime.getHours() + 1);
 
         // Check if this specific hour has any conflicts
         for (const booking of relevantBookings) {
