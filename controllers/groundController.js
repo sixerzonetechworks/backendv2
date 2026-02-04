@@ -154,13 +154,9 @@ function calculatePrice(ground, date, hour) {
   const pricing = ground.pricing;
   
   // Determine if weekday or weekend
-  const dayOfWeek = date.getDay(); // 0 = Sunday, 6 = Saturday
-  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-  
-  // Determine if first half or second half
-  // First half: 6 AM to 6 PM (hours 6-17)
-  // Second half: 6 PM to 6 AM (hours 18-23 and 0-5)
+  const dayOfWeek = date.getUTCDay(); // 0 = Sunday, 6 = Saturday
   const isFirstHalf = hour >= 6 && hour < 18;
+  const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6) || (dayOfWeek === 5 && !isFirstHalf);
   
   // Select appropriate pricing key
   let pricingKey;
@@ -577,9 +573,8 @@ export const getAvailableGrounds = async (req, res) => {
       return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
     }
 
-    // Create date at midnight IST
-    const dateObj = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
-    dateObj.setMinutes(dateObj.getMinutes() - 330); // Subtract IST offset
+    // Create date at noon IST for correct day calculation
+    const dateObj = new Date(Date.UTC(year, month - 1, day, 6, 30, 0, 0));
     
     if (isNaN(dateObj.getTime())) {
       return res.status(400).json({ error: 'Invalid date' });

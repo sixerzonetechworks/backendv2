@@ -93,16 +93,27 @@ export const bookSlot = async (req, res) => {
     // DATE & TIME VALIDATION
     // ========================================================================
     
-    const dateObj = new Date(date + 'T00:00:00');
-    if (isNaN(dateObj.getTime())) {
+    // Parse date in IST (UTC+5:30)
+    const [year, month, day] = date.split('-').map(Number);
+    if (!year || !month || !day) {
       return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
     }
 
-    const startTime = new Date(dateObj);
-    startTime.setHours(startHourNum, 0, 0, 0);
+    // Create date at midnight IST for day-based queries
+    const dateObj = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+    dateObj.setMinutes(dateObj.getMinutes() - 330);
+
+    // Calculate UTC time for the start hour in IST
+    const istOffsetHours = 5.5;
+    const utcHourFloat = startHourNum - istOffsetHours;
+    const dayOffset = utcHourFloat < 0 ? -1 : 0;
+    const utcHour = Math.floor((utcHourFloat + 24) % 24);
+    const utcMinute = ((utcHourFloat + 24) % 1) * 60;
+
+    const startTime = new Date(Date.UTC(year, month - 1, day + dayOffset, utcHour, utcMinute, 0, 0));
 
     const endTime = new Date(startTime);
-    endTime.setHours(startTime.getHours() + 1);
+    endTime.setUTCHours(endTime.getUTCHours() + 1);
 
     // Check if booking is in the past (30-minute buffer)
     const now = new Date();
@@ -175,12 +186,9 @@ export const bookSlot = async (req, res) => {
     // ========================================================================
     
     const duration = 1; // Always 1 hour
-    const dayOfWeek = startTime.getDay();
-    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-    
-    // First half: 6 AM to 6 PM (hours 6-17)
-    // Second half: 6 PM to 6 AM (hours 18-23 and 0-5)
+    const dayOfWeek = startTime.getUTCDay();
     const isFirstHalf = startHourNum >= 6 && startHourNum < 18;
+    const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6) || (dayOfWeek === 5 && !isFirstHalf);
     
     let pricingKey;
     if (isWeekend) {
