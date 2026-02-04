@@ -12,10 +12,10 @@
  * 
  * Pricing Structure:
  * Pricing is stored as JSON with different rates for:
- * - Weekday_first_half: Monday-Friday, 12:00 AM - 11:59 AM
- * - Weekday_second_half: Monday-Friday, 12:00 PM - 11:59 PM
- * - Weekend_first_half: Saturday-Sunday, 12:00 AM - 11:59 AM
- * - Weekend_second_half: Saturday-Sunday, 12:00 PM - 11:59 PM
+ * - Weekday_first_half: Monday-Thursday, 6:00 AM - 5:59 PM; Friday, 6:00 AM - 5:59 PM
+ * - Weekday_second_half: Monday-Thursday, 6:00 PM - 5:59 AM
+ * - Weekend_first_half: Saturday-Sunday, 6:00 AM - 5:59 PM; Friday, 6:00 PM - 5:59 AM
+ * - Weekend_second_half: Saturday-Sunday, 6:00 PM - 5:59 AM
  * 
  * Example pricing JSON:
  * {

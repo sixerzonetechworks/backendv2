@@ -78,15 +78,11 @@ function getRelatedGrounds(groundName) {
  * @returns {number} Price for this hour in INR
  */
 function calculateHourPricing(ground, date, hour) {
-  const dayOfWeek = date.getDay();
+  const dayOfWeek = date.getUTCDay();
   
   // Determine if weekend (0 = Sunday, 6 = Saturday)
-  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-  
-  // Determine if first half or second half
-  // First half: 6 AM to 6 PM (hours 6-17)
-  // Second half: 6 PM to 6 AM (hours 18-23 and 0-5)
   const isFirstHalf = hour >= 6 && hour < 18;
+  const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6) || (dayOfWeek === 5 && !isFirstHalf);
   
   // Select pricing key from ground's pricing JSON
   let pricingKey;
@@ -340,11 +336,8 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    // Create date at midnight IST by using UTC and adjusting for IST offset
-    // IST = UTC + 5:30, so we subtract 5:30 from midnight to get the correct UTC time
-    const dateObj = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
-    // Subtract IST offset (5.5 hours = 330 minutes) to get IST midnight in UTC terms
-    dateObj.setMinutes(dateObj.getMinutes() - 330);
+    // Create date at noon IST for correct day calculation
+    const dateObj = new Date(Date.UTC(year, month - 1, day, 6, 30, 0, 0));
     
     if (isNaN(dateObj.getTime())) {
       return res.status(400).json({ 
