@@ -25,6 +25,7 @@
 import Razorpay from 'razorpay';
 import crypto from 'crypto';
 import db from '../models/index.js';
+const IST_OFFSET_MINUTES = 330;
 
 // ============================================================================
 // RAZORPAY INITIALIZATION
@@ -96,6 +97,57 @@ function calculateHourPricing(ground, date, hour) {
   return ground.pricing[pricingKey] || 1000; // Default to 1000 if key not found
 }
 
+function getIstDayBounds(dateString) {
+  const [year, month, day] = String(dateString).split('-').map(Number);
+  if (!year || !month || !day) {
+    return {
+      success: false,
+      message: 'Invalid date format. Use YYYY-MM-DD'
+    };
+  }
+
+  const startUtcMs = Date.UTC(year, month - 1, day, 0, 0, 0, 0) - (IST_OFFSET_MINUTES * 60 * 1000);
+  return {
+    success: true,
+    data: {
+      start: new Date(startUtcMs),
+      end: new Date(startUtcMs + (24 * 60 * 60 * 1000))
+    }
+  };
+}
+
+function buildIstBookingWindow(dateString, startHour, duration) {
+  const parsedStartHour = Number(startHour);
+  const parsedDuration = Number(duration);
+
+  if (!Number.isInteger(parsedStartHour) || parsedStartHour < 0 || parsedStartHour > 23) {
+    return {
+      success: false,
+      message: 'startHour must be between 0 and 23'
+    };
+  }
+
+  if (!Number.isInteger(parsedDuration) || parsedDuration < 1 || parsedDuration > 24) {
+    return {
+      success: false,
+      message: 'duration must be between 1 and 24'
+    };
+  }
+
+  const dayBounds = getIstDayBounds(dateString);
+  if (!dayBounds.success) {
+    return dayBounds;
+  }
+
+  const startTime = new Date(dayBounds.data.start.getTime() + (parsedStartHour * 60 * 60 * 1000));
+  const endTime = new Date(startTime.getTime() + (parsedDuration * 60 * 60 * 1000));
+
+  return {
+    success: true,
+    data: { startTime, endTime }
+  };
+}
+
 /**
  * Calculate total pricing for multiple consecutive hours
  * Each hour is priced individually based on its time-of-day rate
@@ -129,57 +181,25 @@ function calculatePricing(ground, date, startHours) {
  * - Checks if any requested hour overlaps with any booked hour
  * - Handles multi-hour bookings from legacy data
  * 
- * @param {number[]} startHours - Array of requested start hours (0-23)
- * @param {Date} dateObj - Requested date (start of day)
+ * @param {Date} requestedStartTime - Requested start time
+ * @param {Date} requestedEndTime - Requested end time
  * @param {number[]} relevantGroundIds - IDs of ground and related grounds
  * @returns {Promise<boolean>} True if any slot is already booked
  */
-async function checkSlotConflict(startHours, dateObj, relevantGroundIds) {
-  // Convert single number to array for backward compatibility
-  const hoursArray = Array.isArray(startHours) ? startHours : [startHours];
-  
-  // Fetch overlapping bookings for the entire day
+async function checkSlotConflict(requestedStartTime, requestedEndTime, relevantGroundIds) {
   const overlappingBookings = await db.Booking.findAll({
     where: {
       groundId: {
         [db.Sequelize.Op.in]: relevantGroundIds
       },
-      startTime: {
-        [db.Sequelize.Op.gte]: dateObj,
-        [db.Sequelize.Op.lt]: new Date(dateObj.getTime() + 24 * 60 * 60 * 1000)
-      },
+      startTime: { [db.Sequelize.Op.lt]: requestedEndTime },
+      endTime: { [db.Sequelize.Op.gt]: requestedStartTime },
       paymentStatus: {
         [db.Sequelize.Op.in]: ['paid', 'processing']
       }
     }
   });
-
-  // Check if any requested hour conflicts with any booking
-  for (const requestedHour of hoursArray) {
-    const hasConflict = overlappingBookings.some(booking => {
-      const bookingStartHour = booking.startTime.getHours();
-      
-      // Check single-hour booking (standard case)
-      if (booking.duration === 1 && bookingStartHour === requestedHour) {
-        return true;
-      }
-      
-      // Check multi-hour bookings
-      for (let i = 0; i < booking.duration; i++) {
-        if ((bookingStartHour + i) % 24 === requestedHour) {
-          return true;
-        }
-      }
-      
-      return false;
-    });
-    
-    if (hasConflict) {
-      return true;
-    }
-  }
-  
-  return false;
+  return overlappingBookings.length > 0;
 }
 
 // ============================================================================
@@ -325,40 +345,29 @@ export const createOrder = async (req, res) => {
     // DATE & TIME VALIDATION
     // ========================================================================
     
-    // Parse date in IST (UTC+5:30) to ensure consistency across different server timezones
-    // Date format: YYYY-MM-DD
-    const [year, month, day] = date.split('-').map(Number);
-    if (!year || !month || !day) {
+    const dayBounds = getIstDayBounds(date);
+    if (!dayBounds.success) {
       return res.status(400).json({ 
         success: false,
         error: 'Invalid date format',
-        details: 'Please provide date in YYYY-MM-DD format'
-      });
-    }
-
-    // Create date at noon IST for correct day calculation
-    const dateObj = new Date(Date.UTC(year, month - 1, day, 6, 30, 0, 0));
-    
-    if (isNaN(dateObj.getTime())) {
-      return res.status(400).json({ 
-        success: false,
-        error: 'Invalid date',
-        details: 'Please provide a valid date'
+        details: dayBounds.message
       });
     }
 
     // Create start and end times based on first and last hour
     const sortedHours = [...hoursArray].sort((a, b) => a - b);
     const firstHour = sortedHours[0];
-    const lastHour = sortedHours[sortedHours.length - 1];
     const duration = hoursArray.length;
 
-    // Set times in IST by creating UTC times adjusted for IST offset
-    const startTime = new Date(dateObj);
-    startTime.setHours(startTime.getHours() + firstHour);
-
-    const endTime = new Date(dateObj);
-    endTime.setHours(endTime.getHours() + lastHour + 1);
+    const bookingWindow = buildIstBookingWindow(date, firstHour, duration);
+    if (!bookingWindow.success) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid booking time',
+        details: bookingWindow.message
+      });
+    }
+    const { startTime, endTime } = bookingWindow.data;
 
     // Prevent booking past slots (allow up to 30 minutes into the first slot)
     const now = new Date();
@@ -392,7 +401,7 @@ export const createOrder = async (req, res) => {
     const relevantGroundIds = relevantGrounds.map(g => g.id);
 
     // Check if any of the selected slots are already booked
-    const isSlotBooked = await checkSlotConflict(hoursArray, dateObj, relevantGroundIds);
+    const isSlotBooked = await checkSlotConflict(startTime, endTime, relevantGroundIds);
     
     if (isSlotBooked) {
       return res.status(400).json({ 
@@ -406,7 +415,8 @@ export const createOrder = async (req, res) => {
     // PRICING CALCULATION
     // ========================================================================
     
-    const totalAmount = calculatePricing(ground, dateObj, hoursArray);
+    const pricingDateRef = new Date(dayBounds.data.start.getTime() + (IST_OFFSET_MINUTES * 60 * 1000));
+    const totalAmount = calculatePricing(ground, pricingDateRef, hoursArray);
 
     // ========================================================================
     // CREATE BOOKING (PENDING STATUS)

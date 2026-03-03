@@ -20,6 +20,10 @@ router.get('/statistics', verifyAdmin, adminController.getStatistics);
 
 // Offline booking routes
 router.post('/offline-booking', verifyAdmin, offlineBookingController.createOfflineBooking);
+router.put('/bookings/:id', verifyAdmin, offlineBookingController.updateBooking);
+// Backward-compatible aliases for older admin panels
+router.put('/offline-booking/:id', verifyAdmin, offlineBookingController.updateBooking);
+router.put('/offline-bookings/:id', verifyAdmin, offlineBookingController.updateBooking);
 
 // Blocked slots routes
 router.post('/blocked-slots', verifyAdmin, adminController.blockTimeSlot);
