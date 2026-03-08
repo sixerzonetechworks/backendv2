@@ -120,18 +120,29 @@ function checkTimeOverlap(booking, requestedStart, requestedEnd) {
 }
 
 /**
+ * Normalize slot label for comparison (admin may use " - " or " to ")
+ * @param {string} s - Slot string e.g. "4:00 PM - 5:00 PM" or "4:00 PM to 5:00 PM"
+ * @returns {string} Normalized form
+ */
+function normalizeSlotLabel(s) {
+  if (!s || typeof s !== 'string') return '';
+  return s.replace(/\s*-\s*/g, ' to ').trim();
+}
+
+/**
  * Check if a time slot is blocked by admin
  * 
  * @param {Array} blockedSlots - Array of blocked slot records
- * @param {string} timeSlot - Time slot string (e.g., "9:00 AM - 10:00 AM")
+ * @param {string} timeSlot - Time slot string (e.g., "9:00 AM to 10:00 AM" or "9:00 AM - 10:00 AM")
  * @param {number} groundId - Ground ID to check (null checks all grounds)
  * @returns {boolean} True if slot is blocked
  */
 function isSlotBlocked(blockedSlots, timeSlot, groundId) {
+  const normalized = normalizeSlotLabel(timeSlot);
+  if (!normalized) return false;
   return blockedSlots.some(block => {
-    // Block applies if it's for this specific ground or all grounds (null)
     const appliesToGround = block.groundId === null || block.groundId === groundId;
-    const matchesTimeSlot = block.timeSlot === timeSlot;
+    const matchesTimeSlot = normalizeSlotLabel(block.timeSlot) === normalized;
     return appliesToGround && matchesTimeSlot && block.isActive;
   });
 }
@@ -440,6 +451,12 @@ export const getAvailableSlots = async (req, res) => {
       include: [{ model: db.Ground, as: 'ground' }]
     });
 
+    // Fetch admin-blocked slots for this date (end users cannot book these)
+    const dateStr = date;
+    const blockedSlots = await BlockedSlot.findAll({
+      where: { date: dateStr, isActive: true }
+    });
+
     // ========================================================================
     // TIME CHECKING SETUP
     // ========================================================================
@@ -458,6 +475,7 @@ export const getAvailableSlots = async (req, res) => {
       requestedStartTime.setHours(requestedStartTime.getHours() + hour);
       const slotEndBuffer = new Date(requestedStartTime);
       slotEndBuffer.setMinutes(slotEndBuffer.getMinutes() + 30);
+      const slotLabel = getSlotLabel(hour);
 
       // Check if slot is during closed hours (1 AM - 6 AM)
       let enabled = true;
@@ -466,13 +484,13 @@ export const getAvailableSlots = async (req, res) => {
       } else if (now >= slotEndBuffer) {
         enabled = false;
       } else {
-        const requestedEndTime = new Date(requestedStartTime);
-        requestedEndTime.setHours(requestedEndTime.getHours() + 1);
-
-        // Check if at least one ground is available
+        // Check if at least one ground is available (not booked and not blocked)
         let anyGroundAvailable = false;
         
         for (const ground of grounds) {
+          if (isSlotBlocked(blockedSlots, slotLabel, ground.id)) {
+            continue;
+          }
           const relatedGrounds = getRelatedGrounds(ground.name);
           const allRelevantGrounds = [ground.name, ...relatedGrounds];
           
@@ -497,7 +515,7 @@ export const getAvailableSlots = async (req, res) => {
         enabled = anyGroundAvailable;
       }
       
-      result.push({ slot: getSlotLabel(hour), enabled });
+      result.push({ slot: slotLabel, enabled });
     }
 
     res.json(result);
@@ -598,6 +616,11 @@ export const getAvailableGrounds = async (req, res) => {
       include: [{ model: db.Ground, as: 'ground' }]
     });
 
+    // Fetch admin-blocked slots for this date (end users cannot book these)
+    const blockedSlots = await BlockedSlot.findAll({
+      where: { date: date, isActive: true }
+    });
+
     // ========================================================================
     // CHECK AVAILABILITY FOR EACH GROUND
     // ========================================================================
@@ -611,9 +634,13 @@ export const getAvailableGrounds = async (req, res) => {
         allRelevantGrounds.includes(b.ground.name)
       );
       
-      // Check if ground is available for ALL requested hours
+      // Check if ground is available for ALL requested hours (not booked and not blocked)
       let isAvailable = true;
       for (const hour of hoursArray) {
+        if (isSlotBlocked(blockedSlots, getSlotLabel(hour), ground.id)) {
+          isAvailable = false;
+          break;
+        }
         const requestedStartTime = new Date(dateObj);
         requestedStartTime.setHours(requestedStartTime.getHours() + hour);
         const requestedEndTime = new Date(requestedStartTime);

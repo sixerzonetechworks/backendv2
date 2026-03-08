@@ -97,6 +97,35 @@ function calculateHourPricing(ground, date, hour) {
   return ground.pricing[pricingKey] || 1000; // Default to 1000 if key not found
 }
 
+/** Normalize slot label for comparison (admin may use " - " or " to ") */
+function normalizeSlotLabel(s) {
+  if (!s || typeof s !== 'string') return '';
+  return s.replace(/\s*-\s*/g, ' to ').trim();
+}
+
+/** Slot label from hour (0-23) to match groundController getSlotLabel */
+function getSlotLabelForHour(hour) {
+  const startHour = hour % 12 === 0 ? 12 : hour % 12;
+  const endHour = (hour + 1) % 12 === 0 ? 12 : (hour + 1) % 12;
+  const startAmPm = hour < 12 ? 'AM' : 'PM';
+  const endAmPm = (hour + 1) < 12 || (hour + 1) === 24 ? 'AM' : 'PM';
+  return `${startHour}:00 ${startAmPm} to ${endHour}:00 ${endAmPm}`;
+}
+
+/** Check if any requested hour is blocked for this ground */
+function isAnyHourBlocked(blockedSlots, hoursArray, groundId) {
+  return hoursArray.some(hour => {
+    const slotLabel = getSlotLabelForHour(hour);
+    const normalized = normalizeSlotLabel(slotLabel);
+    return blockedSlots.some(block => {
+      if (!block.isActive) return false;
+      const appliesToGround = block.groundId === null || block.groundId === groundId;
+      const matchesTimeSlot = normalizeSlotLabel(block.timeSlot) === normalized;
+      return appliesToGround && matchesTimeSlot;
+    });
+  });
+}
+
 function getIstDayBounds(dateString) {
   const [year, month, day] = String(dateString).split('-').map(Number);
   if (!year || !month || !day) {
@@ -408,6 +437,18 @@ export const createOrder = async (req, res) => {
         success: false,
         error: 'Time slots not available',
         details: 'One or more selected time slots are already booked. Please choose different slots or a different ground.'
+      });
+    }
+
+    // Check if any requested slot is disabled by admin (blocked for end-user booking)
+    const blockedSlots = await db.BlockedSlot.findAll({
+      where: { date: date, isActive: true }
+    });
+    if (isAnyHourBlocked(blockedSlots, hoursArray, groundId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Time slots not available',
+        details: 'One or more selected time slots are disabled for booking. Please choose a different date or time.'
       });
     }
 
