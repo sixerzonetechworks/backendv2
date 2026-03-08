@@ -473,6 +473,8 @@ export const getAvailableSlots = async (req, res) => {
     for (let hour = 0; hour < 24; hour++) {
       const requestedStartTime = new Date(dateObj);
       requestedStartTime.setHours(requestedStartTime.getHours() + hour);
+      const requestedEndTime = new Date(requestedStartTime);
+      requestedEndTime.setHours(requestedEndTime.getHours() + 1);
       const slotEndBuffer = new Date(requestedStartTime);
       slotEndBuffer.setMinutes(slotEndBuffer.getMinutes() + 30);
       const slotLabel = getSlotLabel(hour);
