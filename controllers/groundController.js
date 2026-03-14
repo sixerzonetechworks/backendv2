@@ -49,6 +49,25 @@ import db from '../models/index.js';
 
 const { Ground, Booking, BlockedSlot } = db;
 
+const IST_OFFSET_MS = 330 * 60 * 1000;
+
+/** Build start of IST day (YYYY-MM-DD 00:00 IST) as UTC Date */
+function getIstDayStart(dateString) {
+  const [year, month, day] = String(dateString).split('-').map(Number);
+  if (!year || !month || !day) return null;
+  const utcMs = Date.UTC(year, month - 1, day, 0, 0, 0, 0) - IST_OFFSET_MS;
+  return new Date(utcMs);
+}
+
+/** Build requested start/end for a slot in IST (date YYYY-MM-DD, hour 0-23) */
+function buildIstSlotBounds(dateString, hour) {
+  const start = getIstDayStart(dateString);
+  if (!start || isNaN(start.getTime())) return null;
+  const startMs = start.getTime() + (hour * 60 * 60 * 1000);
+  const endMs = startMs + (60 * 60 * 1000);
+  return { requestedStartTime: new Date(startMs), requestedEndTime: new Date(endMs) };
+}
+
 // ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
@@ -112,10 +131,8 @@ function getRelatedGrounds(groundName) {
  * @returns {boolean} True if overlap exists
  */
 function checkTimeOverlap(booking, requestedStart, requestedEnd) {
-  const bookingStart = booking.startTime;
-  const bookingEnd = new Date(bookingStart);
-  bookingEnd.setHours(bookingStart.getHours() + booking.duration);
-
+  const bookingStart = new Date(booking.startTime);
+  const bookingEnd = booking.endTime ? new Date(booking.endTime) : new Date(bookingStart.getTime() + (booking.duration || 1) * 60 * 60 * 1000);
   return bookingStart < requestedEnd && bookingEnd > requestedStart;
 }
 
@@ -587,18 +604,13 @@ export const getAvailableGrounds = async (req, res) => {
       }
     }
 
-    // Parse date in IST (UTC+5:30) to ensure consistency
-    const [year, month, day] = date.split('-').map(Number);
-    if (!year || !month || !day) {
+    // Parse date (YYYY-MM-DD) and build IST day bounds
+    const dayStart = getIstDayStart(date);
+    if (!dayStart || isNaN(dayStart.getTime())) {
       return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
     }
 
-    // Create date at noon IST for correct day calculation
-    const dateObj = new Date(Date.UTC(year, month - 1, day, 6, 30, 0, 0));
-    
-    if (isNaN(dateObj.getTime())) {
-      return res.status(400).json({ error: 'Invalid date' });
-    }
+    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
 
     // ========================================================================
     // FETCH GROUNDS AND BOOKINGS
@@ -606,12 +618,12 @@ export const getAvailableGrounds = async (req, res) => {
     
     const grounds = await db.Ground.findAll();
 
-    // Fetch all paid bookings for the date
+    // Fetch all paid bookings for the IST date range
     const bookings = await db.Booking.findAll({
       where: {
         startTime: {
-          [db.Sequelize.Op.gte]: dateObj,
-          [db.Sequelize.Op.lt]: new Date(dateObj.getTime() + 24 * 60 * 60 * 1000)
+          [db.Sequelize.Op.gte]: dayStart,
+          [db.Sequelize.Op.lt]: dayEnd
         },
         paymentStatus: 'paid'
       },
@@ -643,10 +655,12 @@ export const getAvailableGrounds = async (req, res) => {
           isAvailable = false;
           break;
         }
-        const requestedStartTime = new Date(dateObj);
-        requestedStartTime.setHours(requestedStartTime.getHours() + hour);
-        const requestedEndTime = new Date(requestedStartTime);
-        requestedEndTime.setHours(requestedEndTime.getHours() + 1);
+        const slotBounds = buildIstSlotBounds(date, hour);
+        if (!slotBounds) {
+          isAvailable = false;
+          break;
+        }
+        const { requestedStartTime, requestedEndTime } = slotBounds;
 
         // Check if this specific hour has any conflicts
         for (const booking of relevantBookings) {
@@ -659,7 +673,8 @@ export const getAvailableGrounds = async (req, res) => {
         if (!isAvailable) break; // If any hour is unavailable, ground is unavailable
       }
 
-      // Calculate total pricing for all requested hours
+      // Calculate total pricing for all requested hours (dateObj for weekday/weekend)
+      const dateObj = new Date(dayStart.getTime() + IST_OFFSET_MS);
       let totalPrice = 0;
       for (const hour of hoursArray) {
         totalPrice += calculatePrice(ground, dateObj, hour);
@@ -673,6 +688,7 @@ export const getAvailableGrounds = async (req, res) => {
         name: ground.name,
         description: ground.description,
         available: isAvailable,
+        disabled: !isAvailable, // Explicit: ground is disabled when already booked or blocked
         price: totalPrice, // Total price for all hours
         pricePerHour: pricePerHour, // Average price per hour
         pricing: ground.pricing // Include full pricing object for admin panel

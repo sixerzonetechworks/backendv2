@@ -16,6 +16,7 @@ router.post('/login', adminController.login);
 // Protected routes (require admin authentication)
 router.get('/bookings', verifyAdmin, adminController.getAllBookings);
 router.get('/bookings/search', verifyAdmin, adminController.searchBooking);
+router.delete('/bookings/:id', verifyAdmin, adminController.deleteBooking);
 router.get('/statistics', verifyAdmin, adminController.getStatistics);
 
 // Offline booking routes

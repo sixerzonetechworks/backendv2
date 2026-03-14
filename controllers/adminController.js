@@ -429,6 +429,38 @@ export const getBlockedSlots = async (req, res) => {
   }
 };
 
+/**
+ * Delete a booking (admin only).
+ * Once deleted, the date/time slot becomes available for end users to book.
+ */
+export const deleteBooking = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const booking = await Booking.findByPk(id);
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+
+    await booking.destroy();
+
+    res.json({
+      success: true,
+      message: 'Booking deleted successfully. The slot is now available for new bookings.'
+    });
+  } catch (error) {
+    console.error('Delete booking error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete booking',
+      error: error.message
+    });
+  }
+};
+
 export default {
   login,
   getAllBookings,
@@ -436,5 +468,6 @@ export default {
   getStatistics,
   blockTimeSlot,
   unblockTimeSlot,
-  getBlockedSlots
+  getBlockedSlots,
+  deleteBooking
 };
