@@ -178,6 +178,23 @@ export default (sequelize, DataTypes) => {
       type: DataTypes.TEXT,
       allowNull: true,
       comment: 'Reason for payment failure (if any)'
+    },
+    
+    // ========================================================================
+    // SMART SPLIT BOOKING FIELDS
+    // ========================================================================
+    
+    splitBookingId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      comment: 'UUID grouping multiple booking rows that form one split booking transaction'
+    },
+    
+    splitType: {
+      type: DataTypes.ENUM('single', 'split'),
+      allowNull: false,
+      defaultValue: 'single',
+      comment: 'Indicates if this booking is standalone (single) or part of a split booking (split)'
     }
   }, {
     // Enable timestamps
@@ -204,6 +221,10 @@ export default (sequelize, DataTypes) => {
         fields: ['email']
       },
       // Index for finding bookings by Razorpay order ID
+      // Index for finding split booking groups
+      {
+        fields: ['splitBookingId']
+      },
       {
         unique: true,
         fields: ['razorpayOrderId'],

@@ -548,6 +548,281 @@ export const createOrder = async (req, res) => {
   }
 };
 
+// ============================================================================
+// SPLIT BOOKING ORDER CREATION
+// ============================================================================
+
+/**
+ * Create a Razorpay order for a split booking (multiple grounds)
+ * 
+ * Creates N booking records (one per slot/ground) linked by a splitBookingId UUID,
+ * and one Razorpay order for the total amount.
+ * 
+ * @route POST /api/payments/create-split-order
+ * @body {string} name - Customer name
+ * @body {string} phone - Customer phone
+ * @body {string} email - Customer email
+ * @body {string} date - Date in YYYY-MM-DD format
+ * @body {Array} slots - Array of { groundId, hour } objects
+ * @returns {Object} Booking and Razorpay order details
+ */
+export const createSplitOrder = async (req, res) => {
+  try {
+    const { name, phone, email, date, slots } = req.body;
+
+    // ========================================================================
+    // INPUT VALIDATION
+    // ========================================================================
+
+    if (!name || !phone || !email || !date || !slots || !Array.isArray(slots) || slots.length < 2) {
+      return res.status(400).json({
+        success: false,
+        error: 'All fields required. slots must be an array with at least 2 entries.',
+        details: 'Provide name, phone, email, date, and slots [{groundId, hour}, ...]'
+      });
+    }
+
+    // Validate email
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ success: false, error: 'Invalid email format' });
+    }
+
+    // Validate phone
+    const phoneStr = phone.toString().replace(/\D/g, '');
+    if (phoneStr.length < 10 || phoneStr.length > 15) {
+      return res.status(400).json({ success: false, error: 'Invalid phone number' });
+    }
+
+    // Validate and sort slots
+    const parsedSlots = slots.map(s => ({
+      groundId: parseInt(s.groundId),
+      hour: parseInt(s.hour)
+    }));
+
+    for (const slot of parsedSlots) {
+      if (isNaN(slot.groundId) || isNaN(slot.hour) || slot.hour < 0 || slot.hour > 23) {
+        return res.status(400).json({
+          success: false,
+          error: 'Each slot must have valid groundId and hour (0-23)'
+        });
+      }
+      // Check closed hours
+      if (slot.hour >= 1 && slot.hour < 6) {
+        return res.status(400).json({
+          success: false,
+          error: 'Turf is closed from 1:00 AM to 6:00 AM'
+        });
+      }
+    }
+
+    // Sort by hour
+    parsedSlots.sort((a, b) => a.hour - b.hour);
+
+    // Validate consecutive hours
+    for (let i = 1; i < parsedSlots.length; i++) {
+      if (parsedSlots[i].hour !== parsedSlots[i - 1].hour + 1) {
+        return res.status(400).json({
+          success: false,
+          error: 'Slots must cover consecutive hours'
+        });
+      }
+    }
+
+    console.log(`📅 Split booking request: ${name} | ${parsedSlots.length} slots | ${date}`);
+
+    // ========================================================================
+    // DATE & TIME VALIDATION
+    // ========================================================================
+
+    const dayBounds = getIstDayBounds(date);
+    if (!dayBounds.success) {
+      return res.status(400).json({ success: false, error: dayBounds.message });
+    }
+
+    // Check first slot isn't in the past
+    const firstSlotWindow = buildIstBookingWindow(date, parsedSlots[0].hour, 1);
+    if (!firstSlotWindow.success) {
+      return res.status(400).json({ success: false, error: firstSlotWindow.message });
+    }
+    const now = new Date();
+    const slotEndBuffer = new Date(firstSlotWindow.data.startTime);
+    slotEndBuffer.setMinutes(slotEndBuffer.getMinutes() + 30);
+    if (now >= slotEndBuffer) {
+      return res.status(400).json({
+        success: false,
+        error: 'The first time slot has already passed.'
+      });
+    }
+
+    // ========================================================================
+    // CONFLICT DETECTION FOR EACH SLOT
+    // ========================================================================
+
+    // Fetch blocked slots for the date
+    const blockedSlots = await db.BlockedSlot.findAll({
+      where: { date: date, isActive: true }
+    });
+
+    let totalAmount = 0;
+    const bookingWindows = []; // { groundId, ground, startTime, endTime, hour, price }
+
+    for (const slot of parsedSlots) {
+      const ground = await db.Ground.findByPk(slot.groundId);
+      if (!ground) {
+        return res.status(404).json({
+          success: false,
+          error: `Ground with ID ${slot.groundId} not found`
+        });
+      }
+
+      // Check if slot is blocked
+      if (isAnyHourBlocked(blockedSlots, [slot.hour], slot.groundId)) {
+        return res.status(400).json({
+          success: false,
+          error: `Slot at hour ${slot.hour} is disabled for ground ${ground.name}`
+        });
+      }
+
+      // Build booking window for this single hour
+      const window = buildIstBookingWindow(date, slot.hour, 1);
+      if (!window.success) {
+        return res.status(400).json({ success: false, error: window.message });
+      }
+
+      // Check conflict
+      const relatedGrounds = getRelatedGrounds(ground.name);
+      const allRelevantGroundNames = [ground.name, ...relatedGrounds];
+      const relevantGrounds = await db.Ground.findAll({
+        where: { name: { [db.Sequelize.Op.in]: allRelevantGroundNames } }
+      });
+      const relevantGroundIds = relevantGrounds.map(g => g.id);
+
+      const isBooked = await checkSlotConflict(
+        window.data.startTime,
+        window.data.endTime,
+        relevantGroundIds
+      );
+
+      if (isBooked) {
+        return res.status(400).json({
+          success: false,
+          error: `Slot at hour ${slot.hour} on ${ground.name} is already booked`
+        });
+      }
+
+      // Calculate price
+      const pricingDateRef = new Date(dayBounds.data.start.getTime() + (IST_OFFSET_MINUTES * 60 * 1000));
+      const price = calculateHourPricing(ground, pricingDateRef, slot.hour);
+      totalAmount += price;
+
+      bookingWindows.push({
+        groundId: slot.groundId,
+        ground,
+        startTime: window.data.startTime,
+        endTime: window.data.endTime,
+        hour: slot.hour,
+        price
+      });
+    }
+
+    // ========================================================================
+    // CREATE SPLIT BOOKINGS
+    // ========================================================================
+
+    const splitBookingId = crypto.randomUUID();
+    const createdBookings = [];
+
+    for (const bw of bookingWindows) {
+      const booking = await db.Booking.create({
+        name,
+        phone,
+        email,
+        groundId: bw.groundId,
+        startTime: bw.startTime,
+        endTime: bw.endTime,
+        duration: 1,
+        totalAmount: bw.price,
+        paymentStatus: 'pending',
+        paymentAttempts: 0,
+        splitBookingId,
+        splitType: 'split'
+      });
+      createdBookings.push(booking);
+    }
+
+    console.log(`✅ Split bookings created: ${createdBookings.map(b => b.id).join(', ')} | splitId: ${splitBookingId} | Total: ₹${totalAmount}`);
+
+    // ========================================================================
+    // CREATE RAZORPAY ORDER (single order for total amount)
+    // ========================================================================
+
+    const razorpayOrder = await razorpay.orders.create({
+      amount: Math.round(totalAmount * 100),
+      currency: 'INR',
+      receipt: `split_${splitBookingId.substring(0, 8)}`,
+      notes: {
+        splitBookingId,
+        bookingIds: createdBookings.map(b => b.id).join(','),
+        slots: parsedSlots.map(s => `${s.hour}:G${s.groundId}`).join('|'),
+        duration: parsedSlots.length,
+        customerEmail: email
+      }
+    });
+
+    console.log(`💳 Razorpay split order: ${razorpayOrder.id} | ₹${totalAmount}`);
+
+    // Update all bookings with Razorpay order ID and processing status
+    for (const booking of createdBookings) {
+      await booking.update({
+        razorpayOrderId: razorpayOrder.id,
+        paymentStatus: 'processing'
+      });
+    }
+
+    // ========================================================================
+    // RETURN RESPONSE
+    // ========================================================================
+
+    res.status(201).json({
+      success: true,
+      booking: {
+        id: createdBookings[0].id, // Primary booking ID for reference
+        splitBookingId,
+        name,
+        phone,
+        email,
+        date,
+        splitType: 'split',
+        slots: bookingWindows.map((bw, i) => ({
+          bookingId: createdBookings[i].id,
+          groundId: bw.groundId,
+          groundName: bw.ground.name,
+          hour: bw.hour,
+          startTime: bw.startTime,
+          endTime: bw.endTime,
+          price: bw.price
+        })),
+        duration: parsedSlots.length,
+        totalAmount,
+        paymentStatus: 'processing'
+      },
+      order: {
+        id: razorpayOrder.id,
+        amount: razorpayOrder.amount,
+        currency: razorpayOrder.currency
+      },
+      razorpayKeyId: process.env.RAZORPAY_KEY_ID
+    });
+  } catch (error) {
+    console.error('Error creating split order:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
 /**
  * Verify payment signature and update booking status
  * 
@@ -682,6 +957,26 @@ export const verifyPayment = async (req, res) => {
       paymentAttempts: booking.paymentAttempts + 1
     });
 
+    // If this is a split booking, also mark all sibling bookings as paid
+    if (booking.splitBookingId) {
+      await db.Booking.update(
+        {
+          paymentStatus: 'paid',
+          razorpayPaymentId: razorpay_payment_id,
+          razorpaySignature: razorpay_signature,
+          paymentMethod: paymentDetails.method,
+          paymentCompletedAt: new Date()
+        },
+        {
+          where: {
+            splitBookingId: booking.splitBookingId,
+            id: { [db.Sequelize.Op.ne]: booking.id }
+          }
+        }
+      );
+      console.log(`✅ Split booking siblings also marked as paid for splitId: ${booking.splitBookingId}`);
+    }
+
     console.log(`✅ Payment verified: Booking ${booking.id} | ${razorpay_payment_id} | ₹${booking.totalAmount}`);
 
     // ========================================================================
@@ -764,6 +1059,22 @@ export const handlePaymentFailure = async (req, res) => {
       paymentFailureReason: error?.description || error?.reason || 'Payment failed by user'
     });
 
+    // If this is a split booking, also mark all sibling bookings as failed
+    if (booking.splitBookingId) {
+      await db.Booking.update(
+        {
+          paymentStatus: 'failed',
+          paymentFailureReason: error?.description || error?.reason || 'Payment failed by user (sibling)'
+        },
+        {
+          where: {
+            splitBookingId: booking.splitBookingId,
+            id: { [db.Sequelize.Op.ne]: booking.id }
+          }
+        }
+      );
+    }
+
     console.log(`❌ Payment failed: Booking ${booking.id} | Reason: ${error?.description || 'User cancelled'}`);
 
     // ========================================================================
@@ -825,10 +1136,20 @@ export const cancelBooking = async (req, res) => {
     }
 
     // ========================================================================
-    // DELETE BOOKING
+    // DELETE BOOKING (and siblings if split)
     // ========================================================================
     
-    await booking.destroy();
+    if (booking.splitBookingId) {
+      // Delete all bookings in this split group
+      await db.Booking.destroy({
+        where: {
+          splitBookingId: booking.splitBookingId,
+          paymentStatus: { [db.Sequelize.Op.ne]: 'paid' }
+        }
+      });
+    } else {
+      await booking.destroy();
+    }
 
     // ========================================================================
     // RETURN RESPONSE

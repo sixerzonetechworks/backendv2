@@ -286,7 +286,7 @@ export const xssProtection = (req, res, next) => {
 export const hppProtection = (req, res, next) => {
   try {
     // Whitelist of parameters that are allowed to be arrays
-    const whitelist = ["filter", "sort", "fields", "amenities", "tags", "startHours"];
+    const whitelist = ["filter", "sort", "fields", "amenities", "tags", "startHours", "slots"];
 
     /**
      * Deduplicate parameters - keep only last value unless whitelisted

@@ -18,7 +18,8 @@ import {
   getAvailableDates, 
   getAvailableSlots, 
   getAvailableGrounds,
-  updateGroundPricing
+  updateGroundPricing,
+  getSmartBookingOptions
 } from '../controllers/groundController.js';
 // ============================================================================
 // ADMIN: UPDATE GROUND PRICING
@@ -90,5 +91,17 @@ router.get('/grounds/get-available-slots', getAvailableSlots);
  * ]
  */
 router.get('/grounds/get-available-grounds', getAvailableGrounds);
+
+/**
+ * Get smart booking options for a date, start hour, and duration
+ * Returns single-ground and split-ground options sorted by convenience
+ * 
+ * @route GET /api/grounds/get-smart-options
+ * @query {string} date - Date in YYYY-MM-DD format (required)
+ * @query {number} startHour - Start hour 0-23 (required)
+ * @query {number} duration - Number of hours 1-12 (required)
+ * @returns {Object} { date, startHour, duration, requiredHours, options: [...] }
+ */
+router.get('/grounds/get-smart-options', getSmartBookingOptions);
 
 export default router;

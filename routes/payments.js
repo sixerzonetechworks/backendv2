@@ -24,7 +24,8 @@ import {
   createOrder, 
   verifyPayment, 
   handlePaymentFailure, 
-  cancelBooking 
+  cancelBooking,
+  createSplitOrder
 } from '../controllers/paymentController.js';
 
 const router = express.Router();
@@ -74,6 +75,19 @@ const router = express.Router();
  * }
  */
 router.post('/payments/create-order', createOrder);
+
+/**
+ * Create a Razorpay order for a split booking (multiple grounds)
+ * 
+ * @route POST /api/payments/create-split-order
+ * @body {string} name - Customer name
+ * @body {string} phone - Customer phone
+ * @body {string} email - Customer email  
+ * @body {string} date - Date in YYYY-MM-DD format
+ * @body {Array} slots - Array of { groundId, hour } objects
+ * @returns {Object} Booking and Razorpay order details
+ */
+router.post('/payments/create-split-order', createSplitOrder);
 
 /**
  * Verify payment signature after successful payment

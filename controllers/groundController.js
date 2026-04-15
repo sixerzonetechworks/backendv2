@@ -246,8 +246,14 @@ export const getAvailableDates = async (req, res) => {
     // FETCH GROUNDS AND BOOKINGS
     // ========================================================================
     
-    // Fetch all grounds
-    const grounds = await db.Ground.findAll();
+    // Fetch all grounds except Mega_Ground
+    const grounds = await db.Ground.findAll({
+      where: {
+        name: {
+          [db.Sequelize.Op.ne]: 'Mega_Ground'
+        }
+      }
+    });
 
     // Fetch all paid bookings for the next 45 days
     const bookings = await db.Booking.findAll({
@@ -454,7 +460,14 @@ export const getAvailableSlots = async (req, res) => {
     // FETCH GROUNDS AND BOOKINGS
     // ========================================================================
     
-    const grounds = await db.Ground.findAll();
+    // Fetch grounds except Mega_Ground
+    const grounds = await db.Ground.findAll({
+      where: {
+        name: {
+          [db.Sequelize.Op.ne]: 'Mega_Ground'
+        }
+      }
+    });
 
     // Fetch all paid bookings for the date
     const bookings = await db.Booking.findAll({
@@ -616,7 +629,14 @@ export const getAvailableGrounds = async (req, res) => {
     // FETCH GROUNDS AND BOOKINGS
     // ========================================================================
     
-    const grounds = await db.Ground.findAll();
+    // Fetch all grounds except Mega_Ground
+    const grounds = await db.Ground.findAll({
+      where: {
+        name: {
+          [db.Sequelize.Op.ne]: 'Mega_Ground'
+        }
+      }
+    });
 
     // Fetch all paid bookings for the IST date range
     const bookings = await db.Booking.findAll({
@@ -699,6 +719,349 @@ export const getAvailableGrounds = async (req, res) => {
   } catch (error) {
     console.error('Error fetching available grounds:', error);
     res.status(500).json({ 
+      error: 'Internal server error',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+// ============================================================================
+// SMART SPLIT BOOKING - N-SLOT ALLOCATION ALGORITHM
+// ============================================================================
+
+/**
+ * Get smart booking options for a given date, start hour, and duration.
+ *
+ * Returns an array of booking options including:
+ * - Single-ground options (0 switches) for each fully-available ground
+ * - Split/switch-ground options (1-2 switches) across G1/G2
+ *
+ * The algorithm builds an availability matrix and uses recursive backtracking
+ * to find all valid N-hour paths across grounds.
+ *
+ * @route GET /api/grounds/get-smart-options?date=YYYY-MM-DD&startHour=N&duration=N
+ * @query {string} date - Date in YYYY-MM-DD format
+ * @query {number} startHour - Starting hour (0-23)
+ * @query {number} duration - Number of consecutive hours (1-12)
+ * @returns {Array} Sorted array of booking options
+ */
+export const getSmartBookingOptions = async (req, res) => {
+  try {
+    const { date, startHour, duration } = req.query;
+
+    // ========================================================================
+    // INPUT VALIDATION
+    // ========================================================================
+
+    if (!date || startHour === undefined || !duration) {
+      return res.status(400).json({
+        error: 'date, startHour, and duration are required query parameters'
+      });
+    }
+
+    const parsedStartHour = parseInt(startHour);
+    const parsedDuration = parseInt(duration);
+
+    if (isNaN(parsedStartHour) || parsedStartHour < 0 || parsedStartHour > 23) {
+      return res.status(400).json({ error: 'startHour must be between 0 and 23' });
+    }
+    if (isNaN(parsedDuration) || parsedDuration < 1 || parsedDuration > 12) {
+      return res.status(400).json({ error: 'duration must be between 1 and 12' });
+    }
+
+    // Generate the array of required hours
+    const requiredHours = [];
+    for (let i = 0; i < parsedDuration; i++) {
+      const hour = parsedStartHour + i;
+      if (hour > 23) {
+        return res.status(400).json({
+          error: 'Requested time range extends past midnight. Please select a shorter duration.'
+        });
+      }
+      if (isClosedHour(hour)) {
+        return res.status(400).json({
+          error: `Hour ${hour}:00 falls within closed hours (1 AM - 6 AM).`
+        });
+      }
+      requiredHours.push(hour);
+    }
+
+    // Parse date and build IST day bounds
+    const dayStart = getIstDayStart(date);
+    if (!dayStart || isNaN(dayStart.getTime())) {
+      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+    }
+    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+
+    // Check if any requested slot is in the past
+    const now = new Date();
+    const firstSlotBounds = buildIstSlotBounds(date, requiredHours[0]);
+    if (firstSlotBounds) {
+      const slotEndBuffer = new Date(firstSlotBounds.requestedStartTime);
+      slotEndBuffer.setMinutes(slotEndBuffer.getMinutes() + 30);
+      if (now >= slotEndBuffer) {
+        return res.status(400).json({
+          error: 'The requested start time has already passed.'
+        });
+      }
+    }
+
+    // ========================================================================
+    // FETCH GROUNDS, BOOKINGS, AND BLOCKED SLOTS
+    // ========================================================================
+
+    // Exclude Mega_Ground per user request to disable double ground facility
+    const grounds = await db.Ground.findAll({
+      where: {
+        name: {
+          [db.Sequelize.Op.ne]: 'Mega_Ground'
+        }
+      }
+    });
+    const bookings = await db.Booking.findAll({
+      where: {
+        startTime: {
+          [db.Sequelize.Op.gte]: dayStart,
+          [db.Sequelize.Op.lt]: dayEnd
+        },
+        paymentStatus: {
+          [db.Sequelize.Op.in]: ['paid', 'processing']
+        }
+      },
+      include: [{ model: db.Ground, as: 'ground' }]
+    });
+
+    const blockedSlots = await BlockedSlot.findAll({
+      where: { date: date, isActive: true }
+    });
+
+    // ========================================================================
+    // BUILD AVAILABILITY MATRIX
+    // ========================================================================
+
+    // matrix[groundName][hour] = true (available) | false (booked/blocked)
+    const matrix = {};
+    const groundMap = {}; // groundName -> ground model object
+
+    for (const ground of grounds) {
+      groundMap[ground.name] = ground;
+      matrix[ground.name] = {};
+
+      for (const hour of requiredHours) {
+        const slotLabel = getSlotLabel(hour);
+
+        // Check if blocked
+        if (isSlotBlocked(blockedSlots, slotLabel, ground.id)) {
+          matrix[ground.name][hour] = false;
+          continue;
+        }
+
+        // Check if booked (including related grounds)
+        const relatedGrounds = getRelatedGrounds(ground.name);
+        const allRelevantGrounds = [ground.name, ...relatedGrounds];
+        const relevantBookings = bookings.filter(b =>
+          allRelevantGrounds.includes(b.ground.name)
+        );
+
+        const slotBounds = buildIstSlotBounds(date, hour);
+        if (!slotBounds) {
+          matrix[ground.name][hour] = false;
+          continue;
+        }
+
+        let isAvailable = true;
+        for (const booking of relevantBookings) {
+          if (checkTimeOverlap(booking, slotBounds.requestedStartTime, slotBounds.requestedEndTime)) {
+            isAvailable = false;
+            break;
+          }
+        }
+
+        matrix[ground.name][hour] = isAvailable;
+      }
+    }
+
+    // ========================================================================
+    // PRICING HELPER
+    // ========================================================================
+
+    const dateObj = new Date(dayStart.getTime() + IST_OFFSET_MS);
+
+    function getPriceForSlot(groundName, hour) {
+      const ground = groundMap[groundName];
+      if (!ground) return 0;
+      return calculatePrice(ground, dateObj, hour);
+    }
+
+    // ========================================================================
+    // 1. SINGLE-GROUND OPTIONS (0 switches)
+    // ========================================================================
+
+    const options = [];
+
+    for (const ground of grounds) {
+      let allAvailable = true;
+      let totalPrice = 0;
+      const slots = [];
+
+      for (const hour of requiredHours) {
+        if (!matrix[ground.name][hour]) {
+          allAvailable = false;
+          break;
+        }
+        const price = getPriceForSlot(ground.name, hour);
+        totalPrice += price;
+        slots.push({
+          hour,
+          groundId: ground.id,
+          groundName: ground.name,
+          price
+        });
+      }
+
+      options.push({
+        type: 'single',
+        label: ground.name === 'Mega_Ground' ? 'Double Ground' : (ground.name === 'G1' ? 'Ground 1' : 'Ground 2'),
+        groundName: ground.name,
+        groundId: ground.id,
+        description: ground.description,
+        switches: 0,
+        slots,
+        totalPrice,
+        pricePerHour: Math.round(totalPrice / parsedDuration),
+        available: allAvailable,
+        disabled: !allAvailable
+      });
+    }
+
+    // ========================================================================
+    // 2. SPLIT-GROUND OPTIONS (1-2 switches) - Only G1/G2
+    // ========================================================================
+
+    const splitGrounds = ['G1', 'G2'];
+    const splitPaths = [];
+
+    // Only compute splits if no single-ground option is fully available
+    // and this is a multi-hour booking
+    if (!options.some(opt => opt.available) && parsedDuration > 1) {
+      function findSplitPaths(slotIndex, currentPath, switchCount) {
+        if (slotIndex === requiredHours.length) {
+          // Only add if there's at least one switch
+          if (switchCount > 0) {
+            splitPaths.push({
+              path: [...currentPath],
+              switches: switchCount
+            });
+          }
+          return;
+        }
+
+        const hour = requiredHours[slotIndex];
+
+        for (const groundName of splitGrounds) {
+          if (!matrix[groundName] || !matrix[groundName][hour]) continue;
+
+          const lastGround = currentPath.length > 0
+            ? currentPath[currentPath.length - 1].groundName
+            : null;
+
+          let newSwitchCount = switchCount;
+          if (lastGround && lastGround !== groundName) {
+            newSwitchCount++;
+          }
+
+          const price = getPriceForSlot(groundName, hour);
+          currentPath.push({
+            hour,
+            groundId: groundMap[groundName].id,
+            groundName,
+            price
+          });
+
+          findSplitPaths(slotIndex + 1, currentPath, newSwitchCount);
+          currentPath.pop();
+        }
+      }
+
+      findSplitPaths(0, [], 0);
+
+      // Deduplicate split paths
+      const seenSequences = new Set();
+      const splitOptionsCandidate = [];
+
+      for (const { path, switches } of splitPaths) {
+        const sequence = path.map(s => s.groundName).join(',');
+        if (seenSequences.has(sequence)) continue;
+        seenSequences.add(sequence);
+
+        const totalPrice = path.reduce((sum, s) => sum + s.price, 0);
+
+        const segments = [];
+        let currentSegment = { groundName: path[0].groundName, hours: [path[0].hour] };
+        for (let i = 1; i < path.length; i++) {
+          if (path[i].groundName === currentSegment.groundName) {
+            currentSegment.hours.push(path[i].hour);
+          } else {
+            segments.push(currentSegment);
+            currentSegment = { groundName: path[i].groundName, hours: [path[i].hour] };
+          }
+        }
+        segments.push(currentSegment);
+
+        const labelParts = segments.map(seg => {
+          const displayName = seg.groundName === 'G1' ? 'Ground 1' : 'Ground 2';
+          const startLabel = getSlotLabel(seg.hours[0]).split(' to ')[0];
+          const endLabel = getSlotLabel(seg.hours[seg.hours.length - 1]).split(' to ')[1];
+          return `${displayName} (${startLabel} - ${endLabel})`;
+        });
+
+        splitOptionsCandidate.push({
+          type: 'split',
+          label: 'Switch Grounds',
+          description: labelParts.join(' → '),
+          switches,
+          segments,
+          slots: path.map(s => ({ ...s })),
+          totalPrice,
+          pricePerHour: Math.round(totalPrice / parsedDuration)
+        });
+      }
+
+      // We only want to generate a single split card that has the minimum number of switches
+      if (splitOptionsCandidate.length > 0) {
+        // Find the absolute minimum switches across all valid paths
+        const minSwitches = Math.min(...splitOptionsCandidate.map(o => o.switches));
+        
+        // Filter out all paths that have more switches than the minimum
+        const bestOptions = splitOptionsCandidate.filter(o => o.switches === minSwitches);
+        
+        // Pick the best one (we sort by price just as a tie-breaker, then take [0])
+        bestOptions.sort((a, b) => a.totalPrice - b.totalPrice);
+        
+        options.push(bestOptions[0]);
+      }
+    }
+
+    // ========================================================================
+    // 3. SORT - single options
+    // ========================================================================
+
+    options.sort((a, b) => {
+      // If we have a single option vs a split option, single comes first conceptually
+      // but here options array either contains multiple single options OR one split option.
+      return a.totalPrice - b.totalPrice;
+    });
+
+    res.json({
+      date,
+      startHour: parsedStartHour,
+      duration: parsedDuration,
+      requiredHours,
+      options
+    });
+  } catch (error) {
+    console.error('Error computing smart booking options:', error);
+    res.status(500).json({
       error: 'Internal server error',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
